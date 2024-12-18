@@ -957,6 +957,9 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
     // Allocate host memory for results
     int* h_deltas = (int*)malloc(num_pairs * sizeof(int));
     int* h_node_pairs = (int*)malloc(num_pairs * 2 * sizeof(int));
+    int  num_positives=0;
+    int  num_zeros=0;
+    int* positive_pairs = (int*)malloc(num_pairs * 2 * sizeof(int));
 
     int node_m1 ;
     int node_m2 ;
@@ -1005,8 +1008,12 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
 	            improvements=0;
                     num_pair = 3 + rand() % 3;
     
-    
-		    memcpy(current_mapping, best_mapping, (max_node + 1) * sizeof(int));
+                    if (iter-last<500  || (best_score-current_score)*1.0/5154247.0 >0.002) {
+		        memcpy(current_mapping, best_mapping, (max_node + 1) * sizeof(int));
+			    //printf("Perturbate best  in iter %d, last is %d, current score =%d, best score =%d\n",iter,last, current_score,best_score);
+		    } else {
+			    //printf("Perturbate current  in iter %d, last is %d, current score =%d, best score =%d\n",iter,last, current_score,best_score);
+		    }
     
 
 		    // Modified random_swap_k_vertices to return changed vertices
@@ -1048,7 +1055,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
                     iter++;
         	    current_time = time(NULL);
                     if (iter % 2400 ==0) { 
-    			            LOG_INFO("Average time for once quick brute-force search is  %f for iteration %d", (current_time-start_time)/(iter*1.0),iter);
+    			            LOG_INFO("Average time for once quick brute-force search is  %f s for iteration %d, running time =%d s", (current_time-start_time)/(iter*1.0),iter,current_time-start_time);
 			            LOG_INFO("Current score is %d  best score is %d of rank %d, improvement =%d", current_score, best_score, rank,improvements);
 		    }
         		// Copy results back to host
@@ -1058,30 +1065,65 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
 		        // Find best improvement
 		    max_delta = 0;
 		    best_pair_idx = -1;
-
+                    num_positives=0;
+		    num_zeros=0;
 		    for (int i = 0; i < total_pairs; i++) {
 		         if (h_deltas[i] > max_delta) {
 		               max_delta = h_deltas[i];
 		               best_pair_idx = i;
 		          }
-		    }
+		         if (h_deltas[i] > 0 ) {
+		               positive_pairs[num_positives*2]=h_node_pairs[i*2];
+		               positive_pairs[num_positives*2+1]=h_node_pairs[i*2+1];
+			       num_positives++;
+			 }
+		         if (h_deltas[i] == 0 ) {
+		               positive_pairs[num_pairs * 2-2-num_zeros*2]=h_node_pairs[i*2];
+		               positive_pairs[num_pairs * 2-2-num_zeros*2+1]=h_node_pairs[i*2+1];
+			       num_zeros++;
+			 }
 
-		    while  (max_delta > 0) {
-		            node_m1 = h_node_pairs[best_pair_idx * 2];
-		            node_m2 = h_node_pairs[best_pair_idx * 2 + 1];
+		    }
+                    int zerocheck=0;
+		    while  ((max_delta > 0 || num_zeros>0) && (zerocheck<1000)) {
+			    if (max_delta>0) {
+				    //if (rand() %2 ==0 iter-last>120 && num_positives>0) {
+				    if (rand() % 2 ==0 ) {
+					    int select=rand() % num_positives;
+			            	    node_m1 = positive_pairs[select * 2];
+			                    node_m2 = positive_pairs[select * 2 + 1];
+					    int tmpdelta=calculate_swap_delta(gm, gf, current_mapping, node_m1,node_m2);
+					    //printf("Positive, random pair %d with delta %d and the max is %d in iter %d, current score is %d, best score is %d\n",select,tmpdelta,max_delta,iter,current_score,best_score);
+
+				    } else {
+			                    node_m1 = h_node_pairs[best_pair_idx * 2];
+			                    node_m2 = h_node_pairs[best_pair_idx * 2 + 1];
+					    //printf("Positive, best max delta is %d in iter %d, current score is %d, best score is %d\n",max_delta,iter,current_score,best_score);
+				    }
+				    zerocheck=0;
+			    } else {
+					    int select=rand() % num_zeros;
+			            	    node_m1 = positive_pairs[num_pairs * 2-2-select * 2];
+			                    node_m2 = positive_pairs[num_pairs * 2-2-select * 2 + 1];
+					    zerocheck++;
+					    //printf("Zero,select zero pair  %d in iter %d,current score= %d best score= %d\n",select,iter,current_score,best_score);
+			    }
             
             		    // Perform swap
 		            int temp = current_mapping[node_m1];
 		            current_mapping[node_m1] = current_mapping[node_m2];
 		            current_mapping[node_m2] = temp;
-                            current_score+=max_delta;
+                            //current_score+=max_delta;
+                            current_score = calculate_alignment_score(gm, gf, current_mapping);
+
 		            improvements++;
             
 		            if (current_score > best_score) {
 		                memcpy(best_mapping, current_mapping, (max_node + 1) * sizeof(int));
 		                best_score = current_score;
-		                LOG_INFO("Process %d found new best score: %d", rank, best_score);
+		                LOG_INFO("Process %d found new best score: %d in iter %d", rank, best_score,iter);
 		                save_intermediate_mapping(out_path, best_mapping, max_node, gm, gf, best_score);
+				last=iter;
 		            }
 
                             num_changed=2;
@@ -1124,15 +1166,27 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
 			        // Find best improvement
 			    max_delta = 0;
 			    best_pair_idx = -1;
+			    num_positives=0;
+			    num_zeros=0;
 			    for (int i = 0; i < total_pairs; i++) {
 			            if (h_deltas[i] > max_delta) {
 			                max_delta = h_deltas[i];
 			                best_pair_idx = i;
 			            }
+				    if (h_deltas[i] > 0 ) {
+			               positive_pairs[num_positives*2]=h_node_pairs[i*2];
+			               positive_pairs[num_positives*2+1]=h_node_pairs[i*2+1];
+				       num_positives++;
+				    }
+	 		            if (h_deltas[i] == 0 ) {
+			               positive_pairs[num_pairs * 2-2-num_zeros*2]=h_node_pairs[i*2];
+			               positive_pairs[num_pairs * 2-2-num_zeros*2+1]=h_node_pairs[i*2+1];
+				       num_zeros++;
+				    }
 			    }
         		    current_time = time(NULL);
-                            if (iter % 2400 ==0) { 
-    			            LOG_INFO("Average time for once quick brute-force search is  %f for iteration %d", (current_time-start_time)/(iter*1.0),iter);
+	                    if (iter % 2400 ==0) { 
+    			            LOG_INFO("Average time for once quick brute-force search is  %f s for iteration %d, running time =%d s", (current_time-start_time)/(iter*1.0),iter,current_time-start_time);
 			            LOG_INFO("Current score is %d  best score is %d of rank %d, improvement =%d", current_score, best_score, rank,improvements);
 			    }
 
@@ -1154,6 +1208,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
 
     free(h_deltas);
     free(h_node_pairs);
+    free(positive_pairs);
     free(h_adj_matrix_m);
     free(h_adj_matrix_f);
     free(current_mapping);
