@@ -7,6 +7,9 @@
 //#include <omp.h>
 
 #include <cstdlib>  // for malloc
+
+#include <cstdio>  // for io
+
 #include <mpi.h>
 
 
@@ -25,6 +28,19 @@ __global__ void calculateSwapDeltasKernel(
     int* deltas,
     int* node_pairs
 );
+
+__global__ void calculateSwapDeltasKernelQuick(
+    const short* adj_matrix_m,
+    const short* adj_matrix_f,
+    const int* mapping,
+    int num_nodes,
+    const int* changed_vertices,  // Array of vertices that were swapped
+    int num_changed,             // Number of changed vertices
+    int* deltas,
+    int* node_pairs
+);
+
+
 
 #endif
 
@@ -115,6 +131,150 @@ __global__ void calculateSwapDeltasKernel(
 
 
 
+// Add new kernel parameters for changed vertices
+
+__global__ void calculateSwapDeltasKernelQuick(
+    const short* adj_matrix_m,
+    const short* adj_matrix_f,
+    const int* mapping,
+    int num_nodes,
+    const int* changed_vertices, 
+    int num_changed,
+    int* deltas,
+    int* node_pairs
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int returnidx = idx;
+    int num_unchanged = num_nodes - num_changed;
+    int total_pairs = num_changed * num_unchanged + num_changed*(num_changed-1)/2;
+
+    if (idx >= total_pairs) return;
+
+    int matrix_dim = num_nodes + 1;  // Add this line
+    int delta = 0;
+
+    int node_m1,node_m2,node_f1,node_f2;
+    int node_m1_idx,node_m2_idx;
+    if (idx <num_changed*(num_changed-1)/2) {// both are changed vertices
+
+        int node_m1_idx = 0;
+        int temp = num_changed - 1;
+        while (idx >= temp) {
+            idx -= temp;
+            node_m1_idx++;
+            temp--;
+        }
+        int node_m2_idx = node_m1_idx + idx + 1;
+	node_m1=changed_vertices[node_m1_idx];
+	node_m2=changed_vertices[node_m2_idx];
+
+        node_f1 = mapping[node_m1];
+        node_f2 = mapping[node_m2];
+
+    } else {
+        idx -= num_changed*(num_changed-1)/2;
+        // Get changed vertex
+        node_m1_idx = idx / num_unchanged;
+	if (node_m1_idx >= num_changed) {
+		return;
+	}
+        node_m1 = changed_vertices[node_m1_idx];
+	node_m2_idx = idx- node_m1_idx* num_unchanged;
+        if (node_m2_idx >= num_unchanged ) {
+            return;  // Beyond valid range
+        }
+        node_m2  = changed_vertices[num_changed+node_m2_idx];
+
+        node_f1 = mapping[node_m1];
+        node_f2 = mapping[node_m2];
+    }
+
+    // Rest of delta calculation remains the same
+    for (int i = 1; i <= num_nodes; i++) {
+        if (i == node_m1 || i == node_m2) continue;
+
+        // Outgoing edges from node_m1
+        if (adj_matrix_m[node_m1 * matrix_dim + i] > 0) {
+            int weight_m = adj_matrix_m[node_m1 * matrix_dim + i];
+            int dst_f = mapping[i];
+            delta += min(weight_m, adj_matrix_f[node_f2 * matrix_dim + dst_f]) -
+                    min(weight_m, adj_matrix_f[node_f1 * matrix_dim + dst_f]);
+        }
+
+
+        // Incoming edges to node_m1
+        if (adj_matrix_m[i * matrix_dim + node_m1] > 0) {
+            int weight_m = adj_matrix_m[i * matrix_dim + node_m1];
+            int src_f = mapping[i];
+            delta += min(weight_m, adj_matrix_f[src_f * matrix_dim + node_f2]) - 
+                    min(weight_m, adj_matrix_f[src_f * matrix_dim + node_f1]);
+        }
+        
+        // Outgoing edges from node_m2
+        if (adj_matrix_m[node_m2 * matrix_dim + i] > 0) {
+            int weight_m = adj_matrix_m[node_m2 * matrix_dim + i];
+            int dst_f = mapping[i];
+            delta += min(weight_m, adj_matrix_f[node_f1 * matrix_dim + dst_f]) - 
+                    min(weight_m, adj_matrix_f[node_f2 * matrix_dim + dst_f]);
+        }
+        
+        // Incoming edges to node_m2
+        if (adj_matrix_m[i * matrix_dim + node_m2] > 0) {
+            int weight_m = adj_matrix_m[i * matrix_dim + node_m2];
+            int src_f = mapping[i];
+            delta += min(weight_m, adj_matrix_f[src_f * matrix_dim + node_f1]) - 
+                    min(weight_m, adj_matrix_f[src_f * matrix_dim + node_f2]);
+        }
+    }
+    
+    // Handle direct edges between swapped nodes
+    int m1_to_m2 = adj_matrix_m[node_m1 * matrix_dim + node_m2];
+    if (m1_to_m2 > 0) {
+        delta += min(m1_to_m2, adj_matrix_f[node_f2 * matrix_dim + node_f1]) - 
+                min(m1_to_m2, adj_matrix_f[node_f1 * matrix_dim + node_f2]);
+    }
+    
+    int m2_to_m1 = adj_matrix_m[node_m2 * matrix_dim + node_m1];
+    if (m2_to_m1 > 0) {
+        delta += min(m2_to_m1, adj_matrix_f[node_f1 * matrix_dim + node_f2]) - 
+                min(m2_to_m1, adj_matrix_f[node_f2 * matrix_dim + node_f1]);
+    }
+    deltas[returnidx] = delta;
+    node_pairs[returnidx * 2] = node_m1;
+    node_pairs[returnidx * 2 + 1] = node_m2;
+}
+
+void sortArray(int arr[], int size) {
+    for(int i = 0; i < size-1; i++) {
+        for(int j = 0; j < size-i-1; j++) {
+            if(arr[j] > arr[j+1]) {
+                // Swap elements
+                int temp = arr[j];
+                arr[j] = arr[j+1];
+                arr[j+1] = temp;
+            }
+        }
+    }
+}
+
+
+void    fillArray(int changed_vertices[],int num_changed,int max_node){
+                    int* present = (int*)calloc(max_node, sizeof(int));
+
+                    for(int i = 0; i < num_changed ; i++) {
+                        present[changed_vertices[i]-1] = 1;
+                    }
+
+                    // Fill rest of array with missing numbers
+                   int nextPos = num_changed;  // First empty position
+                   for(int i=0;i<max_node;i++)   {
+                        if(present[i]!=1) {
+                                changed_vertices[nextPos++] = i+1;
+                        }
+                    }
+
+                    free(present);
+}
 
 // Add these constants
 #define SYNC_INTERVAL 1800  // Sync every 1 hour
@@ -664,19 +824,26 @@ void save_intermediate_mapping(const char* filename, int* mapping, int max_node,
     }
 }
 
-void random_swap_k_vertices(int* mapping, int n, int k,int seed) {
+
+
+
+void random_swap_k_vertices(int* mapping, int n, int k, int seed,
+                          int* changed_vertices, int* num_changed) {
     // Create array for tracking selected vertices
     int* selected = (int*)malloc(2*k * sizeof(int));
     int* used = (int*)calloc(n, sizeof(int));  // Track used positions
 
     if (k*2>n) {
-            LOG_ERROR("K is too big : %d",k); 
-    } 
+            LOG_ERROR("K is too big : %d",k);
+    }
     // Randomly select k vertices
     int count = 0;
     srand(time(NULL)+seed);
     while (count < k*2) {
-        int idx = rand() % n;
+        int idx = rand() % (n+1);
+        if (idx==0) {
+                idx++;
+        }
         if (!used[idx]) {
             selected[count] = idx;
             used[idx] = 1;
@@ -691,7 +858,12 @@ void random_swap_k_vertices(int* mapping, int n, int k,int seed) {
 
     }
 
+    *num_changed = 0;
     for (int i = 0; i < k; i++) {
+        // Store both vertices involved in each swap
+        changed_vertices[(*num_changed)++] = selected[i];
+        changed_vertices[(*num_changed)++] = selected[i+k];
+
         mapping[selected[i]] = original_values[i+k];
         mapping[selected[i+k]] = original_values[i];
     }
@@ -705,11 +877,30 @@ void random_swap_k_vertices(int* mapping, int n, int k,int seed) {
 
 
 // Modified optimize_mapping function
-int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* out_path) {
+int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* out_path,int gpu_per_node) {
+
+
+
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
+    int gpu_id = rank % gpu_per_node; // Alternate GPUs
+    cudaSetDevice(gpu_id);
+    printf("MPI Rank %d is using GPU %d\n", rank, gpu_id);
+
+
+    int device = -1;
+    cudaError_t err = cudaGetDevice(&device);
+    if (err != cudaSuccess) {
+        LOG_ERROR("CUDA not initialized: %s", cudaGetErrorString(err));
+        return NULL;
+    }
+    // Print device properties
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, gpu_id);
+    printf("Using CUDA device: %s\n", prop.name);
+
     int max_node = NUM_NODES;
     int num_pairs = (max_node * (max_node - 1)) / 2;
     
@@ -744,7 +935,12 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
     
     cudaMemcpy(d_adj_matrix_m, h_adj_matrix_m, (max_node + 1) * (max_node + 1) * sizeof(short), cudaMemcpyHostToDevice);
     cudaMemcpy(d_adj_matrix_f, h_adj_matrix_f, (max_node + 1) * (max_node + 1) * sizeof(short), cudaMemcpyHostToDevice);
-    
+
+    // In optimize_mapping function:
+    int* d_changed_vertices;
+    cudaMalloc(&d_changed_vertices, max_node * sizeof(int));
+
+
     // Initialize other variables
     int current_score = calculate_alignment_score(gm, gf, current_mapping);
     int best_score = current_score;
@@ -754,121 +950,231 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping, const char* ou
     int last = 0, pass = 0;
     int iter=0;
     
+    // Track changed vertices
+    int* changed_vertices = (int*)malloc( max_node * sizeof(int));
+    int num_changed = 0;
+
     // Apply initial random perturbation
-    random_swap_k_vertices(current_mapping, max_node, 10 + rank, rank);
-    current_score = calculate_alignment_score(gm, gf, current_mapping);
+    //random_swap_k_vertices(current_mapping, max_node, 10 + rank, rank);
+    //current_score = calculate_alignment_score(gm, gf, current_mapping);
     
+
+
+    int* h_deltas = (int*)malloc(num_pairs * sizeof(int));
+    int* h_node_pairs = (int*)malloc(num_pairs * 2 * sizeof(int));
+
+    int node_m1 ;
+    int node_m2 ;
+    int max_delta = 0;
+    int best_pair_idx = -1;
+    int pairs_per_changed ;
+    int total_pairs ;
+    int threadsPerBlock = 256;
+    int numBlocks;
+    int cpu_delta;
+    int num_pair ;
+
+
+
+
     // Main optimization loop
     while (true) {
         // Synchronization block
         time_t current_time = time(NULL);
-        if (difftime(current_time, last_sync_time) >= SYNC_INTERVAL) {
-            LOG_INFO("Process %d, synchronizing with best score %d", rank, best_score);
-            sync_best_solutions(best_mapping, &best_score, max_node);
-            last_sync_time = current_time;
-        }
-        
-        // Copy current mapping to GPU
-        cudaMemcpy(d_mapping, current_mapping, (max_node + 1) * sizeof(int), cudaMemcpyHostToDevice);
-        
-        // Launch kernel
-        int threadsPerBlock = 256;
-        int numBlocks = (num_pairs + threadsPerBlock - 1) / threadsPerBlock;
-        
-        calculateSwapDeltasKernel<<<numBlocks, threadsPerBlock>>>(
-            d_adj_matrix_m,
-            d_adj_matrix_f,
-            d_mapping,
-            max_node,
-            d_deltas,
-            d_node_pairs
-        );
-        
-        // Allocate host memory for results
-        int* h_deltas = (int*)malloc(num_pairs * sizeof(int));
-        int* h_node_pairs = (int*)malloc(num_pairs * 2 * sizeof(int));
-        
-        // Copy results back to host
-        cudaMemcpy(h_deltas, d_deltas, num_pairs * sizeof(int), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_node_pairs, d_node_pairs, num_pairs * 2 * sizeof(int), cudaMemcpyDeviceToHost);
-        
-        // Find best improvement
-        int max_delta = 0;
-        int best_pair_idx = -1;
-        
-        for (int i = 0; i < num_pairs; i++) {
-            if (h_deltas[i] > max_delta) {
-                max_delta = h_deltas[i];
-                best_pair_idx = i;
-            }
-        }
-        
-        // Apply best improvement if found
-        if (max_delta > 0) {
-            int node_m1 = h_node_pairs[best_pair_idx * 2];
-            int node_m2 = h_node_pairs[best_pair_idx * 2 + 1];
-            
-            memcpy(old_mapping, current_mapping, (max_node + 1) * sizeof(int));
-            
-            // Perform swap
-            int temp = current_mapping[node_m1];
-            current_mapping[node_m1] = current_mapping[node_m2];
-            current_mapping[node_m2] = temp;
-            
-            current_score += max_delta;
-            improvements++;
-            
-            if (current_score > best_score) {
-                memcpy(best_mapping, current_mapping, (max_node + 1) * sizeof(int));
-                best_score = current_score;
-                LOG_INFO("Process %d found new best score: %d", rank, best_score);
-                save_intermediate_mapping(out_path, best_mapping, max_node, gm, gf, best_score);
-            }
-            
-            validate_mapping_changes(old_mapping, current_mapping, max_node, node_m1, node_m2);
-        }
-        
-        free(h_deltas);
-        free(h_node_pairs);
-        
-        // Check for stagnation
-        if (last < improvements) {
-            last = improvements;
-            pass = 0;
-        } else {
-            pass++;
-        }
-        
-        if (pass > 2 && improvements - last == 0) {
-            LOG_INFO("Process %d restarting optimization with perturbation", rank);
-            memcpy(current_mapping, best_mapping, (max_node + 1) * sizeof(int));
-            random_swap_k_vertices(current_mapping, max_node, 3 + rank, rank);
-            current_score = calculate_alignment_score(gm, gf, current_mapping);
-            improvements = 0;
-            last = 0;
-            pass = 0;
-        }
-        current_time = time(NULL);
-	if (iter++ %10==0) {
 
-            LOG_INFO("Average time for once brute-force search is  %f", (current_time-start_time)/iter);
-            LOG_INFO("Current score is %d  best score is %d of rank %d", current_score, best_score, rank);
-	}
+
+
+        if (difftime(current_time, last_sync_time) >= SYNC_INTERVAL) {
+              LOG_INFO("Process %d, enter synchronization the best score is %d", rank,best_score);
+              int* benchmark_mapping = load_benchmark_mapping("../data/best.csv", max_node);
+              if (!benchmark_mapping) {
+                  LOG_ERROR("Failed to load benchmark mapping");
+              }
+
+              int benchmark_score = calculate_alignment_score(gm, gf, benchmark_mapping);
+              if (benchmark_score >best_score) {
+                      best_score=benchmark_score;
+                      memcpy(best_mapping, benchmark_mapping, sizeof(int) * (max_node + 1));
+              }
+              free(benchmark_mapping);
+
+
+              sync_best_solutions(best_mapping, &best_score, max_node);
+              last_sync_time = current_time;
+              LOG_INFO("Process %d, after synchronization and best score is %d", rank,best_score);
+
+        }
+
+
+       if  (max_delta == 0  ) {
+                    // Random swap happened
+                    improvements=0;
+                    num_pair = 3 + rand() % 3;
+
+
+                    memcpy(current_mapping, best_mapping, (max_node + 1) * sizeof(int));
+
+
+                    // Modified random_swap_k_vertices to return changed vertices
+                    random_swap_k_vertices(current_mapping, max_node, num_pair, rank,
+                         changed_vertices, &num_changed);
+
+
+                    sortArray(changed_vertices,num_changed);
+
+                    fillArray(changed_vertices,num_changed,max_node);
+                    // Get score before random swap
+                    current_score = calculate_alignment_score(gm, gf, current_mapping);
+
+
+                    // Upload changed vertices to GPU
+                    cudaMemcpy(d_changed_vertices, changed_vertices,
+                               max_node * sizeof(int), cudaMemcpyHostToDevice);
+
+                    cudaMemcpy(d_mapping, current_mapping, (max_node + 1) * sizeof(int), cudaMemcpyHostToDevice);
+                    // Calculate new number of pairs to check
+                    total_pairs = num_changed * (num_changed-1)/2+ num_changed* (max_node-num_changed);
+
+                    // Launch kernel with new parameters
+                    threadsPerBlock = 256;
+                    numBlocks = (total_pairs + threadsPerBlock - 1) / threadsPerBlock;
+
+
+                    calculateSwapDeltasKernelQuick<<<numBlocks, threadsPerBlock>>>(
+                        d_adj_matrix_m,
+                        d_adj_matrix_f,
+                        d_mapping,
+                        max_node,
+                        d_changed_vertices,
+                        num_changed,
+                        d_deltas,
+                        d_node_pairs
+                    );
+                    cudaDeviceSynchronize();
+                    iter++;
+
+                    current_time = time(NULL);
+                    if (iter % 1400 ==0) {
+                                    LOG_INFO("Average time for once quick brute-force search is  %f for iteration %d", (current_time-start_time)/(iter*1.0),iter);
+                                    LOG_INFO("Current score is %d  best score is %d of rank %d, improvement =%d", current_score, best_score, rank,improvements);
+                    }
+                        // Copy results back to host
+                    cudaMemcpy(h_deltas, d_deltas, total_pairs * sizeof(int), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(h_node_pairs, d_node_pairs, total_pairs * 2 * sizeof(int), cudaMemcpyDeviceToHost);
+
+                        // Find best improvement
+                    max_delta = 0;
+                    best_pair_idx = -1;
+
+                    for (int i = 0; i < total_pairs; i++) {
+                         if (h_deltas[i] > max_delta) {
+                               max_delta = h_deltas[i];
+                               best_pair_idx = i;
+                          }
+                    }
+
+                    while  (max_delta > 0) {
+
+
+                            node_m1 = h_node_pairs[best_pair_idx * 2];
+                            node_m2 = h_node_pairs[best_pair_idx * 2 + 1];
+
+                            // Perform swap
+                            int temp = current_mapping[node_m1];
+                            current_mapping[node_m1] = current_mapping[node_m2];
+                            current_mapping[node_m2] = temp;
+                            current_score+=max_delta;
+                            improvements++;
+
+                            if (current_score > best_score) {
+                                memcpy(best_mapping, current_mapping, (max_node + 1) * sizeof(int));
+                                best_score = current_score;
+                                LOG_INFO("Process %d found new best score: %d", rank, best_score);
+                                save_intermediate_mapping(out_path, best_mapping, max_node, gm, gf, best_score);
+                            }
+
+                            num_changed=2;
+                            if (node_m1<node_m2 ){
+                                    changed_vertices[0]=node_m1;
+                                    changed_vertices[1]=node_m2;
+                            } else {
+                                    changed_vertices[1]=node_m1;
+                                    changed_vertices[0]=node_m2;
+                            }
+
+                            fillArray(changed_vertices,num_changed,max_node);
+                            // Upload changed vertices to GPU
+                            cudaMemcpy(d_changed_vertices, changed_vertices,
+                               max_node * sizeof(int), cudaMemcpyHostToDevice);
+
+                            cudaMemcpy(d_mapping, current_mapping, (max_node + 1) * sizeof(int), cudaMemcpyHostToDevice);
+                            // Calculate new number of pairs to check
+                            total_pairs = num_changed * (num_changed-1)/2+ num_changed* (max_node-num_changed);
+
+                            // Launch kernel with new parameters
+                            threadsPerBlock = 256;
+                            numBlocks = (total_pairs + threadsPerBlock - 1) / threadsPerBlock;
+
+                            calculateSwapDeltasKernelQuick<<<numBlocks, threadsPerBlock>>>(
+                                d_adj_matrix_m,
+                                d_adj_matrix_f,
+                                d_mapping,
+                                max_node,
+                                d_changed_vertices,
+                                num_changed,
+                                d_deltas,
+                                d_node_pairs
+                            );
+                            cudaDeviceSynchronize();
+                            cudaMemcpy(h_deltas, d_deltas, total_pairs * sizeof(int), cudaMemcpyDeviceToHost);
+                            cudaMemcpy(h_node_pairs, d_node_pairs, total_pairs * 2 * sizeof(int), cudaMemcpyDeviceToHost);
+                            iter++;
+
+                                // Find best improvement
+                            max_delta = 0;
+                            best_pair_idx = -1;
+                            for (int i = 0; i < total_pairs; i++) {
+                                    if (h_deltas[i] > max_delta) {
+                                        max_delta = h_deltas[i];
+                                        best_pair_idx = i;
+                                    }
+                            }
+                            current_time = time(NULL);
+                            if (iter % 1400 ==0) {
+                                    LOG_INFO("Average time for once quick brute-force search is  %f for iteration %d", (current_time-start_time)/(iter*1.0),iter);
+                                    LOG_INFO("Current score is %d  best score is %d of rank %d, improvement =%d", current_score, best_score, rank,improvements);
+                            }
+
+                    }
+
+
+
+
+        }
+
     }
-    
+
     // Cleanup
     cudaFree(d_adj_matrix_m);
     cudaFree(d_adj_matrix_f);
     cudaFree(d_mapping);
     cudaFree(d_deltas);
     cudaFree(d_node_pairs);
-    
+    cudaFree(d_changed_vertices);
+
+    free(h_deltas);
+    free(h_node_pairs);
     free(h_adj_matrix_m);
     free(h_adj_matrix_f);
     free(current_mapping);
     free(old_mapping);
-    
+    free(changed_vertices);
     return best_mapping;
+
+
+
+
+
 }
 
 // Function to get maximum node ID from graph
@@ -962,14 +1268,16 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+	
     if (argc < 5) {
         if (rank == 0) {
-            LOG_ERROR("Usage: %s <male graph> <female graph> <in mapping> <out mapping>", argv[0]);
+            LOG_ERROR("Usage: %s <male graph> <female graph> <in mapping> <out mapping> <gpu per node>", argv[0]);
         }
         MPI_Finalize();
         return 1;
     }
-	
+
+
 
     time_t total_start = time(NULL);
     // Only rank 0 prints initial information
@@ -1016,7 +1324,10 @@ int main(int argc, char* argv[]) {
     sprintf(outputfilename, "%.*s-rank%d.csv", (int)strlen(argv[4])-4, argv[4], rank);
     LOG_INFO("output file name is %s",outputfilename);
 
-    int* optimized_mapping = optimize_mapping(gm, gf, benchmark, outputfilename);
+    int gpu_per_node = 2;
+    gpu_per_node = atoi ( argv[5]);
+
+    int* optimized_mapping = optimize_mapping(gm, gf, benchmark, outputfilename,gpu_per_node);
     int optimized_score = calculate_alignment_score(gm, gf, optimized_mapping);
     
     time_t total_end = time(NULL);
