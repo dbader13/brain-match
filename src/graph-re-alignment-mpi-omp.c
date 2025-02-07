@@ -551,6 +551,133 @@ void save_intermediate_mapping(const char* filename, int* mapping, int max_node,
     }
 }
 
+
+
+// Function to generate a random number following a skewed normal distribution
+int skewed_random(int n, double skew_factor) {
+    double u = (double)rand() / RAND_MAX;
+    double v = (double)rand() / RAND_MAX;
+    double normal = sqrt(-2.0 * log(u)) * cos(2.0 * M_PI * v);
+    
+    // Apply skewness
+    double skewed = normal + skew_factor;
+    
+    // Scale to the desired range (80-90% of n)
+    int range_start = (int)(0.8 * n);
+    int range_end = (int)(0.9 * n);
+    int range_size = range_end - range_start;
+    
+    // Map the skewed value to the 80-90% range
+    int idx = range_start + (int)((skewed + 3.0) / 6.0 * range_size);
+    
+    // Ensure the index is within bounds
+    if (idx < 0) idx = 0;
+    if (idx >= n) idx = n - 1;
+    
+    return idx;
+}
+
+void random_swap_k_vertices(int* mapping, int n, int k, int seed) {
+    if (k*2 > n) {
+        LOG_ERROR("K is too big : %d", k);
+        return;
+    }
+
+    // Initialize random seed
+    srand(time(NULL) + seed);
+
+    // Create arrays for tracking
+    int* selected = (int*)malloc(2*k * sizeof(int));
+    int* used = (int*)calloc(n, sizeof(int));
+
+    // Parameters for skewed normal distribution
+    double mean = 0.85 * n;  // Center at 85% (middle of 80-90% interval)
+    double std_dev = 0.05 * n;  // Standard deviation to cover 80-90% interval
+
+    // Select vertices with skewed distribution
+    int count = 0;
+    while (count < 2*k) {
+        // Generate normally distributed random number
+        double u1 = (double)rand() / RAND_MAX;
+        double u2 = (double)rand() / RAND_MAX;
+
+        // Box-Muller transform for normal distribution
+        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+
+        // Transform to our desired range
+        int idx = (int)(mean + z * std_dev);
+
+        // Ensure index is within bounds and not used
+        if (idx >= 0 && idx < n && !used[idx]) {
+            selected[count] = idx;
+            used[idx] = 1;
+            count++;
+        }
+    }
+
+    // Store and swap values
+    int* original_values = (int*)malloc(2*k * sizeof(int));
+    for (int i = 0; i < 2*k; i++) {
+        original_values[i] = mapping[selected[i]];
+    }
+
+    for (int i = 0; i < k; i++) {
+        mapping[selected[i]] = original_values[i+k];
+        mapping[selected[i+k]] = original_values[i];
+    }
+
+    // Clean up
+    free(selected);
+    free(used);
+    free(original_values);
+}
+/*
+void random_swap_k_vertices(int* mapping, int n, int k, int seed) {
+    // Create array for tracking selected vertices
+    int* selected = (int*)malloc(2 * k * sizeof(int));
+    int* used = (int*)calloc(n, sizeof(int));  // Track used positions
+
+    if (k * 2 > n) {
+        LOG_ERROR("K is too big : %d", k);
+        free(selected);
+        free(used);
+        return;
+    }
+
+    // Randomly select k vertices with a skewed distribution
+    int count = 0;
+    srand(time(NULL) + seed);
+
+    while (count < 2 * k) {
+        int idx = skewed_random(n, 1.0);  // Adjust skew_factor as needed
+        if (!used[idx]) {
+            selected[count] = idx;
+            used[idx] = 1;
+            count++;
+        }
+    }
+
+    // Store original values
+    int* original_values = (int*)malloc(2 * k * sizeof(int));
+    for (int i = 0; i < 2 * k; i++) {
+        original_values[i] = mapping[selected[i]];
+    }
+
+    // Swap the values
+    for (int i = 0; i < k; i++) {
+        mapping[selected[i]] = original_values[i + k];
+        mapping[selected[i + k]] = original_values[i];
+    }
+
+    // Clean up
+    free(selected);
+    free(used);
+    free(original_values);
+}
+
+
+
+
 void random_swap_k_vertices(int* mapping, int n, int k,int seed) {
     // Create array for tracking selected vertices
     int* selected = (int*)malloc(2*k * sizeof(int));
@@ -589,7 +716,7 @@ void random_swap_k_vertices(int* mapping, int n, int k,int seed) {
     free(original_values);
 }
 
-
+*/
 
 // Function to optimize mapping
 int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
@@ -620,6 +747,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
     int pass=0;
     int last=0;
     time_t last_sync_time = start_time;
+    int iter=0;
 
     // Each process starts with a different random perturbation
 
@@ -629,6 +757,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
     while (true){
 
 	// Check if it's time to sync
+	
         time_t current_time = time(NULL);
         if (difftime(current_time, last_sync_time) >= SYNC_INTERVAL) {
               LOG_INFO("Process %d, enter synchronization the best score is %d", rank,best_score);
@@ -734,17 +863,30 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
                 time_t current_time = time(NULL);
                 double elapsed = difftime(current_time, start_time);
 		int shuffle=3;
+		shuffle=shuffle+rand() % 3 ;
                 LOG_INFO("Process %d Restart Optimization from a perturbation of the best configuration ",rank);
                 LOG_INFO("  - Elapsed time is %f ",elapsed);
                 LOG_INFO("  - Without Progress in %d passes ",pass);
                 LOG_INFO("  - Randomly shuffle %d vertices",shuffle+rank);
                 memcpy(current_mapping, best_mapping, sizeof(int) * (max_node + 1));
-                random_swap_k_vertices(current_mapping,  max_node,  shuffle+rank, rank);
+                random_swap_k_vertices(current_mapping,  max_node,  shuffle, rank);
                 current_score = calculate_alignment_score(gm, gf, current_mapping);
 		improvements=0;
 		last=0;
 		pass=0;
     } 
+    current_time = time(NULL);
+    iter++;
+    if (iter % 2  == 0  && rank==0) {
+                double elapsed = difftime(current_time, start_time);
+                double average_time = elapsed/iter;
+
+                LOG_INFO("Optimization progress %d iteration (Process %d):", iter,rank);
+                LOG_INFO("  - Current score: %s", format_number(current_score));
+                LOG_INFO("  - Current best score: %s", format_number(best_score));
+                LOG_INFO("  - Improvements found: %s", format_number(improvements));
+                LOG_INFO("  - Average time of once iteration : %f", average_time);
+    }
     }// end of while loop
     
     memcpy(best_mapping, current_mapping, sizeof(int) * (max_node + 1));
