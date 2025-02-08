@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdbool.h>
 #include <time.h>
+#include <stdint.h>
+#include <omp.h>
 #include "hungarian.h"
 
 
@@ -554,6 +556,49 @@ int* optimal_assignment(int k, double** cost_matrix){
     return assignment;
 }
 
+void swap(int *x, int *y) {
+    int temp = *x;
+    *x = *y;
+    *y = temp;
+}
+
+
+// State for xoshiro256**
+static uint64_t s[4];
+
+// Seed the generator
+void xoshiro_seed(uint64_t seed) {
+    s[0] = seed;
+    s[1] = 0x123456789ABCDEF;
+    s[2] = 0xFEDCBA987654321;
+    s[3] = 0xABCDEF012345678;
+}
+
+// Generate a 64-bit random number
+static inline uint64_t rotl(const uint64_t x, int k) {
+    return (x << k) | (x >> (64 - k));
+}
+
+uint64_t xoshiro_next(void) {
+    const uint64_t result = rotl(s[1] * 5, 7) * 9;
+    const uint64_t t = s[1] << 17;
+
+    s[2] ^= s[0];
+    s[3] ^= s[1];
+    s[1] ^= s[2];
+    s[0] ^= s[3];
+
+    s[2] ^= t;
+    s[3] = rotl(s[3], 45);
+
+    return result;
+}
+
+// Generate a 32-bit random integer
+int xoshiro_rand(void) {
+    return (int)(xoshiro_next() >> 32);
+}
+
 
 // Function to optimize mapping
 int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
@@ -579,13 +624,38 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
     
     LOG_INFO("Starting optimization with initial score: %s", format_number(current_score));
     srand(time(NULL));
-    int k=700; //choose 5 independent nodes
+    int k=1000; //choose 5 independent nodes
     int iter=0;
+    bool mode=false; //false means start with swaps
+    xoshiro_seed(time(NULL));
+
     while (true){
-        //optimization loop
+        iter++;
+
+
+        //random greedy swaps
+        //if (mode==false) {
+        //    int node1 = (rand()%NUM_NODES);
+        //    int node2 = (rand()%NUM_NODES);
+        //    int delta=calculate_swap_delta(gm,gf,current_mapping,node1, node2);
+        //    if (true){
+        //        //swap(current_mapping[node1],current_mapping[node2]);
+        //        //swap(rev_mapping[node1],rev_mapping[node2]);
+        //        int tmp=current_mapping[node1];
+        //        current_mapping[node1]=current_mapping[node2];
+        //        current_mapping[node2]=tmp;
+        //        current_score+=delta;
+        //    }
+        //    if (iter%100000==0){
+        //        printf("Iter: %i, Score: %i\n", iter, current_score);
+        //    }
+        //    if (iter%1000000==0)save_intermediate_mapping(out_path, current_mapping, max_node, gm, gf, current_score);
+        //    continue;
+        //}
+        if (iter%100 == 0) mode=false;
+        //hungarian optimization
         bool* available = malloc(sizeof(int) * (NUM_NODES + 1));
         int rem_nodes = NUM_NODES;
-        iter++;
         for (int i=1; i<=NUM_NODES; i++){
             available[i]=true;
             //if (gm->adj_matrix[i][i] > 0 || gf->adj_matrix[current_mapping[i]][current_mapping[i]]>0){
@@ -600,10 +670,13 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
             //printf("YES\n");
 
             //printf("i: %i, rem_nodes: %i", i, rem_nodes);
-            if (rem_nodes<=0) break;
-            int rand_ind = (rand() % rem_nodes)+1;
+            if (rem_nodes<=0) {
+                k=i; 
+                break;
+            }
+            int rand_ind = ((rand()) % rem_nodes)+1;
             int chosen=-1;
-            for (int node=1; node<=NUM_NODES; node++){
+            for (int node=1; node<=NUM_NODES; node++){  
                 if (available[node]==false) continue;
                 rand_ind--;
                 if (rand_ind == 0){
@@ -688,7 +761,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
             cost_matrix[i] = (double*)calloc(k, sizeof(double));
         }
         //printf("k: %i\n", k);
-
+        #pragma omp parallel for
         for (int i=0; i<k; i++){
             for (int j=0; j<k; j++){
                 if (i==j) {
@@ -697,6 +770,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
                 }
                 int m_i = subset[i];
                 int m_j = subset[j]; 
+                //cost_matrix[i][j] = 0;
                 cost_matrix[i][j] = one_side_swap_delta(gm, gf, current_mapping, m_i, m_j);
                 //printf("%f ", cost_matrix[i][j]);
             }
@@ -705,7 +779,6 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
 
         int* assignments = optimal_assignment(k, cost_matrix);
         int delta = 0;
-
         int changed=0;
         for (int i=0; i<k; i++){
             //printf("%i, %i\n", i, assignments[i]);
@@ -720,7 +793,7 @@ int* optimize_mapping(Graph* gm, Graph* gf, int* initial_mapping,
         current_score += delta;
         current_score = calculate_alignment_score(gm, gf, current_mapping);
 
-        printf("Score: %i, Delta: %i, Changed: %i\n", current_score, delta, changed);
+        printf("Iter: %i, Score: %i, Delta: %i, Changed: %i, K: %i\n", iter, current_score, delta, changed, k);
         for (int i = 0; i < k; i++) {
             free(cost_matrix[i]);
         }
@@ -910,6 +983,8 @@ Graph* load_graph_from_csv(const char* filename) {
 
 // Main function
 int main(int argc, char* argv[]) {
+    srand( (unsigned) time(NULL) * getpid());
+    omp_set_num_threads(12);
     if (argc < 7) {
         LOG_ERROR("Usage: %s <male graph> <female graph> <male ordering> <female ordering> <in mapping> <out mapping>", argv[0]);
         return 1;
