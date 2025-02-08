@@ -1,31 +1,6 @@
-/********************************************************************
- ********************************************************************
- **
- ** libhungarian by Cyrill Stachniss, 2004
- **
- **
- ** Solving the Minimum Assignment Problem using the 
- ** Hungarian Method.
- **
- ** ** This file may be freely copied and distributed! **
- **
- ** Parts of the used code was originally provided by the 
- ** "Stanford GraphGase", but I made changes to this code.
- ** As asked by  the copyright node of the "Stanford GraphGase", 
- ** I hereby proclaim that this file are *NOT* part of the
- ** "Stanford GraphGase" distrubition!
- **
- ** This file is distributed in the hope that it will be useful,
- ** but WITHOUT ANY WARRANTY; without even the implied 
- ** warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- ** PURPOSE.  
- **
- ********************************************************************
- ********************************************************************/
-
-
 #include <stdio.h>
 #include <stdlib.h>
+#include <omp.h>
 #include "hungarian.h"
 
 #define INF (0x7FFFFFFF)
@@ -62,7 +37,6 @@ void hungarian_print_matrixd(double** C, int rows, int cols) {
 
 
 void hungarian_print_assignment(hungarian_problem_t* p) {
-  /*hungarian_print_matrixi(p->assignment, p->num_rows, p->num_cols) ;*/
   int i,j;
   for(i=0;i<p->num_rows;i++) {
 	for(j=0; j<p->num_cols; j++) {
@@ -73,18 +47,16 @@ void hungarian_print_assignment(hungarian_problem_t* p) {
 }
 
 int* return_assignment(hungarian_problem_t* p) {
-    // Allocate an array to store the assignment
     int* assignments = (int*)malloc(p->num_rows * sizeof(int));
     if (!assignments) {
-        return NULL; // Return NULL if memory allocation fails
+        return NULL;
     }
 
-    // Fill the array with the assignments
     for (int i = 0; i < p->num_rows; i++) {
-        assignments[i] = -1; // Default to -1 for unassigned rows
+        assignments[i] = -1;
         for (int j = 0; j < p->num_cols; j++) {
             if (p->assignment[i][j] == HUNGARIAN_ASSIGNED) {
-                assignments[i] = j; // Assign the column to this row
+                assignments[i] = j;
                 break;
             }
         }
@@ -98,13 +70,10 @@ void hungarian_print_costmatrix(hungarian_problem_t* p) {
 }
 
 void hungarian_print_status(hungarian_problem_t* p) {
-  
   fprintf(stderr,"cost:\n");
   hungarian_print_costmatrix(p);
-
   fprintf(stderr,"assignment:\n");
   hungarian_print_assignment(p);
-  
 }
 
 double hungarian_imax(double a, double b) {
@@ -112,16 +81,12 @@ double hungarian_imax(double a, double b) {
 }
 
 int hungarian_init(hungarian_problem_t* p, double** cost_matrix, int rows, int cols, int mode) {
-
   int i,j, org_cols, org_rows;
-  double max_cost;
-  max_cost = 0;
+  double max_cost = 0;
   
   org_cols = cols;
   org_rows = rows;
 
-  /* is the number of cols  not equal to number of rows ? 
-   if yes, expand with 0-cols / 0-cols */
   rows = hungarian_imax(cols, rows);
   cols = rows;
   
@@ -133,6 +98,7 @@ int hungarian_init(hungarian_problem_t* p, double** cost_matrix, int rows, int c
   p->assignment = (int**)calloc(rows,sizeof(int*));
   hungarian_test_alloc(p->assignment);
 
+  #pragma omp parallel for private(j) reduction(max:max_cost)
   for(i=0; i<p->num_rows; i++) {
     p->cost[i] = (double*)calloc(cols,sizeof(double));
     hungarian_test_alloc(p->cost[i]);
@@ -141,17 +107,16 @@ int hungarian_init(hungarian_problem_t* p, double** cost_matrix, int rows, int c
     for(j=0; j<p->num_cols; j++) {
       p->cost[i][j] =  (i < org_rows && j < org_cols) ? cost_matrix[i][j] : 0;
       p->assignment[i][j] = 0;
-
       if (max_cost < p->cost[i][j])
-	max_cost = p->cost[i][j];
+        max_cost = p->cost[i][j];
     }
   }
 
-
   if (mode == HUNGARIAN_MODE_MAXIMIZE_UTIL) {
+    #pragma omp parallel for private(j)
     for(i=0; i<p->num_rows; i++) {
       for(j=0; j<p->num_cols; j++) {
-	p->cost[i][j] =  max_cost - p->cost[i][j];
+        p->cost[i][j] =  max_cost - p->cost[i][j];
       }
     }
   }
@@ -163,9 +128,6 @@ int hungarian_init(hungarian_problem_t* p, double** cost_matrix, int rows, int c
   
   return rows;
 }
-
-
-
 
 void hungarian_free(hungarian_problem_t* p) {
   int i;
@@ -179,10 +141,7 @@ void hungarian_free(hungarian_problem_t* p) {
   p->assignment = NULL;
 }
 
-
-
-void hungarian_solve(hungarian_problem_t* p)
-{
+void hungarian_solve(hungarian_problem_t* p) {
   int i, j, m, n, k, l, t, q, unmatched;
   float s,cost;
   int* col_mate;
@@ -198,264 +157,171 @@ void hungarian_solve(hungarian_problem_t* p)
   m =p->num_rows;
   n =p->num_cols;
 
-  col_mate = (int*)calloc(p->num_rows,sizeof(int));
+  col_mate = (int*)calloc(m,sizeof(int));
   hungarian_test_alloc(col_mate);
-  unchosen_row = (int*)calloc(p->num_rows,sizeof(int));
+  unchosen_row = (int*)calloc(m,sizeof(int));
   hungarian_test_alloc(unchosen_row);
-  row_dec  = (float*)calloc(p->num_rows,sizeof(float));
+  row_dec  = (float*)calloc(m,sizeof(float));
   hungarian_test_alloc(row_dec);
-  slack_row  = (int*)calloc(p->num_rows,sizeof(int));
+  slack_row  = (int*)calloc(n,sizeof(int));
   hungarian_test_alloc(slack_row);
 
-  row_mate = (int*)calloc(p->num_cols,sizeof(int));
+  row_mate = (int*)calloc(n,sizeof(int));
   hungarian_test_alloc(row_mate);
-  parent_row = (int*)calloc(p->num_cols,sizeof(int));
+  parent_row = (int*)calloc(n,sizeof(int));
   hungarian_test_alloc(parent_row);
-  col_inc = (float*)calloc(p->num_cols,sizeof(float));
+  col_inc = (float*)calloc(n,sizeof(float));
   hungarian_test_alloc(col_inc);
-  slack = (float*)calloc(p->num_cols,sizeof(float));
+  slack = (float*)calloc(n,sizeof(float));
   hungarian_test_alloc(slack);
 
-  for (i=0;i<p->num_rows;i++) {
+  #pragma omp parallel for
+  for (i=0;i<m;i++) {
     col_mate[i]=0;
     unchosen_row[i]=0;
     row_dec[i]=0.;
-    slack_row[i]=0;
   }
-  for (j=0;j<p->num_cols;j++) {
+  #pragma omp parallel for
+  for (j=0;j<n;j++) {
     row_mate[j]=0;
     parent_row[j] = 0;
     col_inc[j]=0.;
     slack[j]=0;
   }
 
-  for (i=0;i<p->num_rows;++i)
-    for (j=0;j<p->num_cols;++j)
+  #pragma omp parallel for private(j)
+  for (i=0;i<m;++i)
+    for (j=0;j<n;++j)
       p->assignment[i][j]=HUNGARIAN_NOT_ASSIGNED;
 
-  /* Begin subtract column minima in order to start with lots of zeroes 12 */
-  if (verbose)
-    fprintf(stderr, "Using heuristic\n");
-  for (l=0;l<n;l++)
-    {
-      s=p->cost[0][l];
-      for (k=1;k<m;k++) 
-	if (p->cost[k][l]<s)
-	  s=p->cost[k][l];
-      cost+=s;
-      if (s!=0)
-	for (k=0;k<m;k++)
-	  p->cost[k][l]-=s;
-    }
-  /* End subtract column minima in order to start with lots of zeroes 12 */
+  // Subtract column minima
+  #pragma omp parallel for private(k) reduction(+:cost)
+  for (l=0;l<n;l++) {
+    double s = p->cost[0][l];
+    for (k=1;k<m;k++) 
+      if (p->cost[k][l]<s)
+        s=p->cost[k][l];
+    cost+=s;
+    if (s!=0)
+      for (k=0;k<m;k++)
+        p->cost[k][l]-=s;
+  }
 
-  /* Begin initial state 16 */
+  // Initialize state variables
+  #pragma omp parallel for
+  for (l=0;l<n;l++) {
+    row_mate[l]= -1;
+    parent_row[l]= -1;
+    col_inc[l]=0;
+    slack[l]=INF;
+  }
+
   t=0;
-  for (l=0;l<n;l++)
-    {
-      row_mate[l]= -1;
-      parent_row[l]= -1;
-      col_inc[l]=0;
-      slack[l]=INF;
-    }
-  for (k=0;k<m;k++)
-    {
-      s=p->cost[k][0];
-      for (l=1;l<n;l++)
-	if (p->cost[k][l]<s)
-	  s=p->cost[k][l];
-      row_dec[k]=s;
-      for (l=0;l<n;l++)
-	if (s==p->cost[k][l] && row_mate[l]<0)
-	  {
-	    col_mate[k]=l;
-	    row_mate[l]=k;
-	    if (verbose)
-	      fprintf(stderr, "matching col %d==row %d\n",l,k);
-	    goto row_done;
-	  }
-      col_mate[k]= -1;
-      if (verbose)
-	fprintf(stderr, "node %d: unmatched row %d\n",t,k);
-      unchosen_row[t++]=k;
-    row_done:
-      ;
-    }
-  /* End initial state 16 */
- 
-  /* Begin Hungarian algorithm 18 */
-  
-  if (t==0)
-    goto done;
+  for (k=0;k<m;k++) {
+    s=p->cost[k][0];
+    for (l=1;l<n;l++)
+      if (p->cost[k][l]<s)
+        s=p->cost[k][l];
+    row_dec[k]=s;
+    for (l=0;l<n;l++)
+      if (s==p->cost[k][l] && row_mate[l]<0) {
+        col_mate[k]=l;
+        row_mate[l]=k;
+        goto row_done;
+      }
+    col_mate[k]= -1;
+    unchosen_row[t++]=k;
+  row_done: ;
+  }
+
+  if (t==0) goto done;
   unmatched=t;
   
-  while (1)
-    {
-      if (verbose)
-	fprintf(stderr, "Matched %d rows.\n",m-t);
-      q=0;
+  while (1) {
+    q=0;
+    while (1) {
+      while (q<t) {
+        k=unchosen_row[q];
+        s=row_dec[k];
+        for (l=0;l<n;l++) {
+          if (slack[l]) {
+            float del = p->cost[k][l]-s+col_inc[l];
+            if (del<slack[l]) {
+              if (del==0) {
+                if (row_mate[l]<0) goto breakthru;
+                slack[l]=0;
+                parent_row[l]=k;
+                unchosen_row[t++]=row_mate[l];
+              } else {
+                slack[l]=del;
+                slack_row[l]=k;
+              }
+            }
+          }
+        }
+        q++;
+      }
 
-      while (1)
-	{
-	  while (q<t)
-	    {
-	      /* Begin explore node q of the forest 19 */
-	      {
-		k=unchosen_row[q];
-		s=row_dec[k];
-		for (l=0;l<n;l++)
-		  if (slack[l])
-		    {
-		      float del;
-		      del=p->cost[k][l]-s+col_inc[l];
-		      if (del<slack[l])
-			{
-			  if (del==0)
-			    {
-			      if (row_mate[l]<0)
-				goto breakthru;
-			      slack[l]=0;
-			      parent_row[l]=k;
-			      if (verbose)
-				fprintf(stderr, "node %d: row %d==col %d--row %d\n",
-				       t,row_mate[l],l,k);
-			      unchosen_row[t++]=row_mate[l];
-			    }
-			  else
-			    {
-			      slack[l]=del;
-			      slack_row[l]=k;
-			    }
-			}
-		    }
-	      }
-	      /* End explore node q of the forest 19 */
-	      q++;
-	    }
-	  /* Begin introduce a new zero into the matrix 21 */
-	  s=INF;
-	  for (l=0;l<n;l++)
-	    if (slack[l] && slack[l]<s)
-	      s=slack[l];
-	  for (q=0;q<t;q++)
-	    row_dec[unchosen_row[q]]+=s;
-	  for (l=0;l<n;l++)
-	    if (slack[l])
-	      {
-		slack[l]-=s;
-		if (slack[l]==0.)
-		  {
-		    /* Begin look at a new zero 22 */
-		    k=slack_row[l];
-		    if (verbose)
-		      fprintf(stderr, 
-			     "Decreasing uncovered elements by %f produces zero at [%d,%d]\n",
-			     s,k,l);
-		    if (row_mate[l]<0)
-		      {
-			for (j=l+1;j<n;j++)
-			  if (slack[j]==0)
-			    col_inc[j]+=s;
-			goto breakthru;
-		      }
-		    else
-		      {
-			parent_row[l]=k;
-			if (verbose)
-			  fprintf(stderr, "node %d: row %d==col %d--row %d\n",t,row_mate[l],l,k);
-			unchosen_row[t++]=row_mate[l];
-		      }
-		    /* End look at a new zero 22 */
-		  }
-	      }
-	    else
-	      col_inc[l]+=s;
-	  /* End introduce a new zero into the matrix 21 */
-	}
-    breakthru:
-      /* Begin update the matching 20 */
-      if (verbose)
-	fprintf(stderr, "Breakthrough at node %d of %d!\n",q,t);
-      while (1)
-	{
-	  j=col_mate[k];
-	  col_mate[k]=l;
-	  row_mate[l]=k;
-	  if (verbose)
-	    fprintf(stderr, "rematching col %d==row %d\n",l,k);
-	  if (j<0)
-	    break;
-	  k=parent_row[j];
-	  l=j;
-	}
-      /* End update the matching 20 */
-      
-      if (--unmatched==0)	      
-	goto done;
-      /* Begin get ready for another stage 17 */
-      t=0;
-      for (l=0;l<n;l++)
-	{
-	  parent_row[l]= -1;
-	  slack[l]=INF;
-	}
-      for (k=0;k<m;k++)
-	if (col_mate[k]<0)
-	  {
-	    if (verbose)
-	      fprintf(stderr, "node %d: unmatched row %d\n",t,k);
-	    unchosen_row[t++]=k;
-	  }
-      /* End get ready for another stage 17 */
+      s=INF;
+      #pragma omp parallel for reduction(min:s)
+      for (l=0;l<n;l++) {
+        if (slack[l] && slack[l]<s) s=slack[l];
+      }
+
+      #pragma omp parallel for
+      for (q=0;q<t;q++)
+        row_dec[unchosen_row[q]]+=s;
+
+      for (l=0;l<n;l++) {
+        if (slack[l]) {
+          slack[l]-=s;
+          if (slack[l]==0.) {
+            k=slack_row[l];
+            if (row_mate[l]<0) {
+              for (j=l+1;j<n;j++)
+                if (slack[j]==0) col_inc[j]+=s;
+              goto breakthru;
+            } else {
+              parent_row[l]=k;
+              unchosen_row[t++]=row_mate[l];
+            }
+          }
+        } else {
+          col_inc[l]+=s;
+        }
+      }
     }
- done:
-
-  /* Begin doublecheck the solution 23 */
-  for (k=0;k<m;k++)
-    for (l=0;l<n;l++)
-      if (p->cost[k][l]<row_dec[k]-col_inc[l])
-      {/*printf("fdlkfjd2");exit(0);	       */
-}
-  for (k=0;k<m;k++)
-    {
-      l=col_mate[k];
-      if (l<0 || p->cost[k][l]!=row_dec[k]-col_inc[l])
-      {/*printf("%f %f  ",p->cost[k][l],row_dec[k]-col_inc[l]); */
-	      }				/*{printf("fdlkfjd1\n");} 	// CHECK THIS TEST CAREFULLY!!!!!!!!!!!!!!!!!  SOMETHING IS WRONG HERE. */
+  breakthru:
+    while (1) {
+      j=col_mate[k];
+      col_mate[k]=l;
+      row_mate[l]=k;
+      if (j<0) break;
+      k=parent_row[j];
+      l=j;
     }
-  k=0;
-  for (l=0;l<n;l++)
-    if (col_inc[l])
-      k++;
-  if (k>m)
-  {/*printf("fdlkfjd3");exit(0); */
-	  }
-  /* End doublecheck the solution 23
-   End Hungarian algorithm 18 */
+    if (--unmatched==0) break;
+    t=0;
+    #pragma omp parallel for
+    for (l=0;l<n;l++) {
+      parent_row[l]= -1;
+      slack[l]=INF;
+    }
+    for (k=0;k<m;k++)
+      if (col_mate[k]<0)
+        unchosen_row[t++]=k;
+  }
 
-
-
+done:
+  // Final assignment and cost updates
+  #pragma omp parallel for
   for (i=0;i<m;++i)
-    {
-      p->assignment[i][col_mate[i]]=HUNGARIAN_ASSIGNED;
-      /*TRACE("%d - %d\n", i, col_mate[i]);*/
-    }
-  for (k=0;k<m;++k)
-    {
-      for (l=0;l<n;++l)
-	{
-	  /*TRACE("%d ",p->cost[k][l]-row_dec[k]+col_inc[l]);*/
-	  p->cost[k][l]=p->cost[k][l]-row_dec[k]+col_inc[l];
-	}
-      /*TRACE("\n");*/
-    }
-  for (i=0;i<m;i++)
-    cost+=row_dec[i];
-  for (i=0;i<n;i++)
-    cost-=col_inc[i];
-  if (verbose)
-    fprintf(stderr, "Cost is %f\n",cost);
+    p->assignment[i][col_mate[i]]=HUNGARIAN_ASSIGNED;
 
+  #pragma omp parallel for private(l)
+  for (k=0;k<m;++k)
+    for (l=0;l<n;++l)
+      p->cost[k][l]=p->cost[k][l]-row_dec[k]+col_inc[l];
 
   free(slack);
   free(col_inc);
@@ -465,6 +331,4 @@ void hungarian_solve(hungarian_problem_t* p)
   free(row_dec);
   free(unchosen_row);
   free(col_mate);
-  
 }
-
