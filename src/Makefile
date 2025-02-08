@@ -46,9 +46,9 @@ GRAPH_ALIGN_PERMSET_PAR_SRCS    = graph-alignment-permset-parallel.c
 COMPUTE_BETWEENNESS_SRCS    = compute-betweenness-order.c
 GRAPH_REALIGN_PAR_SRCS    = re-alignment-parallel.c
 GRAPH_MPI_PAR_SRCS    = graph-re-alignment-mpi-omp.c
-SCORE_LOOKUP_SRCS = $(BEST_SWAP_DIR)score-lookup.c $(BEST_SWAP_DIR)heap.c
+SCORE_LOOKUP_SRCS = $(BEST_SWAP_DIR)xoshiro.c $(BEST_SWAP_DIR)heap.c $(BEST_SWAP_DIR)utils.c $(BEST_SWAP_DIR)interrupts.c $(BEST_SWAP_DIR)parallel_hungarian.c $(BEST_SWAP_DIR)parallel_hungarian_subset.c $(BEST_SWAP_DIR)score-lookup.c 
 CREATE_SCORE_LOOKUP_SRCS = $(BEST_SWAP_DIR)create-score-lookup.c
-PARALLEL_CREATE_SCORE_LOOKUP_SRCS = $(BEST_SWAP_DIR)parallel-create-score-lookup.c
+PARALLEL_CREATE_SCORE_LOOKUP_SRCS = $(BEST_SWAP_DIR)parallel_create_score_lookup.c
 
 
 # Default target to build all programs
@@ -131,13 +131,13 @@ graph-re-alignment-mpi-omp: $(GRAPH_MPI_PAR_SRCS)
 	$(MPICC) $(CFLAGS) $(INCLUDE_FLAGS) -fopenmp -o $@ $^ $(LDFLAGS)
 
 score-lookup: $(SCORE_LOOKUP_SRCS)
-	$(CC) $(CFLAGS) $(INCLUDE_FLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDE_FLAGS) -fopenmp -o $@ $^ $(LDFLAGS)
 
 create-score-lookup: $(CREATE_SCORE_LOOKUP_SRCS)
 	$(CC) $(CFLAGS) $(INCLUDE_FLAGS) -o $@ $^ $(LDFLAGS)
 
 parallel-create-score-lookup: $(PARALLEL_CREATE_SCORE_LOOKUP_SRCS)
-	$(CC) $(CFLAGS) $(INCLUDE_FLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDE_FLAGS) -fopenmp -o $@ $^ $(LDFLAGS)
 
 # Clean up build files
 clean:

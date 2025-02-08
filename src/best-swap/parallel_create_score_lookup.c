@@ -4,17 +4,18 @@
 #include <math.h>
 #include <stdbool.h>
 #include <time.h>
-#include <omp.h> // Add OpenMP header
+#include <signal.h>
+#include <omp.h>
 
-// [Previous defines and constants remain unchanged]
 #define SAVE_INTERVAL 25
 #define UPDATE_INTERVAL 20
 #define MAX_LINE_LENGTH 1024
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #define MAX_NODES 100000
+#define NUM_NODES 18524
 
-const int NUM_NODES = 18524;
+static volatile sig_atomic_t interrupted = 0;
 
 typedef enum {
     LOG_LEVEL_INFO = 0,
@@ -40,8 +41,6 @@ typedef enum {
     }
 
 
-// [Previous type definitions remain unchanged]
-
 // Structure definitions
 typedef struct EdgeMap {
     int* to_nodes;
@@ -57,8 +56,9 @@ typedef struct Graph {
     int node_capacity;
 } Graph;
 
-
-// [Previous helper functions like print_progress remain unchanged]
+void sigint_handler(int sig) {
+    interrupted = 1;
+}
 
 // Function to format numbers with commas
 // Modified to be thread-safe by removing static buffer
@@ -107,7 +107,6 @@ void print_progress(int current, int total, const char* prefix) {
 }
 
 
-// [Previous EdgeMap and Graph management functions remain unchanged]
 EdgeMap* new_edge_map() {
     EdgeMap* em = malloc(sizeof(EdgeMap));
     if (!em) {
@@ -158,7 +157,7 @@ void add_to_edge_map(EdgeMap* em, int to, int weight) {
 
 void add_edge(Graph* g, int from, int to, int weight) {
   //    LOG_DEBUG("Adding edge: %d -> %d (weight: %d)", from, to, weight);
-    g->adj_matrix[from*NUM_NODES + to] = weight;
+    g->adj_matrix[from*NUM_NODES + to] = (short) weight;
     if (g->edges == NULL) {
         g->edges = calloc(MAX_NODES, sizeof(EdgeMap));
         g->reverse_edges = calloc(MAX_NODES, sizeof(EdgeMap));
@@ -178,11 +177,6 @@ void add_edge(Graph* g, int from, int to, int weight) {
     add_to_edge_map(&g->edges[from], to, weight);
     add_to_edge_map(&g->reverse_edges[to], from, weight);
 }
-
-inline int get_weight(Graph* g, int from, int to) {
-    return g->adj_matrix[from*NUM_NODES + to];
-}
-
 
 // Parallelized version of calculate_alignment_score
 int calculate_alignment_score(Graph* gm, Graph* gf, int* mapping) {
@@ -279,7 +273,7 @@ int calculate_swap_delta(Graph* gm, Graph* gf, int* mapping, int node_m1, int no
     
     // Handle direct edges between the swapped nodes
     // From m1 to m2
-    int m1_to_m2 = gm->adj_matrix[node_m1*NUM_NODES + node_m2];
+    short m1_to_m2 = gm->adj_matrix[node_m1*NUM_NODES + node_m2];
     if (m1_to_m2 > 0) {
         int old_weight = MIN(m1_to_m2, gf->adj_matrix[node_f1*NUM_NODES + node_f2]);
         int new_weight = MIN(m1_to_m2, gf->adj_matrix[node_f2*NUM_NODES + node_f1]);
@@ -287,17 +281,32 @@ int calculate_swap_delta(Graph* gm, Graph* gf, int* mapping, int node_m1, int no
     }
     
     // From m2 to m1
-    int m2_to_m1 = gm->adj_matrix[node_m2*NUM_NODES + node_m1];
+    short m2_to_m1 = gm->adj_matrix[node_m2*NUM_NODES + node_m1];
     if (m2_to_m1 > 0) {
         int old_weight = MIN(m2_to_m1, gf->adj_matrix[node_f2*NUM_NODES + node_f1]);
         int new_weight = MIN(m2_to_m1, gf->adj_matrix[node_f1*NUM_NODES + node_f2]);
         delta += new_weight - old_weight;
     }
+
+    //Handle direct edges between the resultants (f1 and f2)
+    // short f1_to_f2 = gf->adj_matrix[node_f1 * NUM_NODES + node_f2];
+    // if (f1_to_f2 > 0) {
+    //     int old_weight = MIN(f1_to_f2, gf->adj_matrix[node_f1 * NUM_NODES + node_f2]);
+    //     int new_weight = MIN(f1_to_f2, gf->adj_matrix[node_f2 * NUM_NODES + node_f1]);
+    //     delta += new_weight - old_weight;
+    // }
+
+    // short f2_to_f1 = gf->adj_matrix[node_f2 * NUM_NODES + node_f1];
+    // if (f2_to_f1 > 0) {
+    //     int old_weight = MIN(f2_to_f1, gf->adj_matrix[node_f2 * NUM_NODES + node_f1]);
+    //     int new_weight = MIN(f2_to_f1, gf->adj_matrix[node_f1 * NUM_NODES + node_f2]);
+    //     delta += new_weight - old_weight;
+    // }
     
     return delta;
 }
 
-short* createScoreLookup(Graph* gm, Graph* gf, int* mapping) {
+short* create_score_lookup(Graph* gm, Graph* gf, int* mapping) {
     LOG_INFO("Creating score lookup using OpenMP...");
     short* lookup = (short*)calloc(NUM_NODES * NUM_NODES, sizeof(short));
     
@@ -324,9 +333,12 @@ short* createScoreLookup(Graph* gm, Graph* gf, int* mapping) {
             int i = (int)((1.0 + sqrt(1 + 8 * n)) * 0.5);
             int j = n - (i * (i-1))/2;
             
+            short delta = (short) calculate_swap_delta(gm, gf, mapping, i+1, j+1);
             // short delta = calculate_swap_delta(gm, gf, mapping, i+1, j+1);
-            lookup[i*NUM_NODES + j] = (short) calculate_swap_delta(gm, gf, mapping, i+1, j+1);
-            lookup[j*NUM_NODES + i] = (short) calculate_swap_delta(gm, gf, mapping, j+1, i+1);
+            lookup[i*NUM_NODES + j] = delta;
+            // lookup[j*NUM_NODES + i] = (short) calculate_swap_delta(gm, gf, mapping, j+1, i+1);
+            lookup[j*NUM_NODES + i] = delta;
+
             
             #pragma omp atomic
             progress++;
@@ -334,9 +346,10 @@ short* createScoreLookup(Graph* gm, Graph* gf, int* mapping) {
             if ((progress & 0x3FFFF) == 0) {
                 #pragma omp critical
                 {
-                    LOG_INFO("Processed %ld swaps out of %ld - %.2f%% complete", 
-                            progress, maxCount, 
-                            ((double)progress / (double)maxCount) * 100.0);
+                    // LOG_INFO("Processed %ld swaps out of %d - %.2f%% complete", 
+                    //         progress, maxCount, 
+                    //         ((double)progress / (double)maxCount) * 100.0);
+                    print_progress(progress, maxCount, "Creating score lookup");
                 }
             }
         }
@@ -352,11 +365,9 @@ void save_lookup(const char* filename, short* lookup) {
     }
     
     for (int i = 0; i < NUM_NODES; i++) {
-        for (int j = 0; j < NUM_NODES-1; j++) {
+        for (int j = 0; j < NUM_NODES; j++) {
             fprintf(file, "%d,", lookup[i*NUM_NODES + j]);
         }
-        fprintf(file, "%d", lookup[i*NUM_NODES + NUM_NODES-1]);
-        fprintf(file, "\n");
     }
     
     fclose(file);
@@ -498,6 +509,10 @@ int main(int argc, char* argv[]) {
         LOG_ERROR("Usage: %s <male graph> <female graph> <in mapping> <out lookup>", argv[0]);
         return 1;
     }
+
+    signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
+    // signal(SIGUSR2, sigint_handler);
     
     // Set OpenMP parameters
     omp_set_nested(1);  // Enable nested parallelism
@@ -536,7 +551,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    short* lookup = createScoreLookup(gm, gf, benchmark);
+    short* lookup = create_score_lookup(gm, gf, benchmark);
     save_lookup(argv[4], lookup);
     
     int initial_score = calculate_alignment_score(gm, gf, benchmark);

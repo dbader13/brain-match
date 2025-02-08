@@ -6,7 +6,7 @@
 typedef struct {
     int nodeM1; // First male node in the swap
     int nodeM2; // Second male node in the swap
-    double delta;   // Delta value of the swap
+    int delta;   // Delta value of the swap
 } Swap;
 
 // Struct representing a bounded max heap of Swaps
@@ -54,12 +54,12 @@ bool extract_max(SwapHeap *heap, Swap *best);
 void invalidate_swaps(SwapHeap *heap, int node_to_invalidate);
 
 /**
- * Check if all delta values in the heap are zero.
+ * Check if there are no positive delta values in the heap.
  *
  * @param heap Pointer to the MaxHeap.
- * @return True if all delta values are zero, false otherwise.
+ * @return True if all delta values are zero or negative, false otherwise.
  */
-bool all_zero_delta(SwapHeap *heap);
+bool no_positive_deltas(SwapHeap *heap);
 
 /**
  * Free the memory associated with the heap.
